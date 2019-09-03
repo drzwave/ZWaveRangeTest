@@ -4,8 +4,8 @@
     But feel free to copy and improve!
 
     Usage: python3 ZWaveRangeTest.py [DEVKITNODEID=xx] [DUTNODEID=xx] [COMPORT=/dev/ttyxxxx or COMx] [inc | exc | rst]
-    DEVKITNODEID is the NodeID of the Z-Wave DevKit that will send the NOPs to the DUT
-    DUTNODEID is the NodeID of the Device Under Test
+    DEVkitnodeid is the NodeID of the Z-Wave DevKit that will send the NOPs to the DUT
+    DUTnodeid is the NodeID of the Device Under Test
     COMPORT is the COM port (windows) or /dev/tty* port (linux) of the Z-Wave interface.
     INC/EXC/RST are Z-Wave network management commands and will Include, Exclude a node or Reset the UZB.
 
@@ -62,6 +62,22 @@ FUNC_ID_ZW_ADD_NODE_TO_NETWORK      = 0x4A
 FUNC_ID_ZW_REMOVE_NODE_FROM_NETWORK = 0x4B
 FUNC_ID_ZW_FIRMWARE_UPDATE_NVM      = 0x78
 
+# PowerLevel Command Class defines
+COMMAND_CLASS_POWERLEVEL            = 0x73
+POWERLEVEL_TEST_NODE_SET            = 0x04
+POWERLEVEL_TEST_NODE_GET            = 0x05
+POWERLEVEL_TEST_NODE_REPORT         = 0x06
+POWERLEVEL_SET_NORMALPOWER          = 0x00
+POWERLEVEL_SET_MINUS1DBM            = 0x01
+POWERLEVEL_SET_MINUS2DBM            = 0x02
+POWERLEVEL_SET_MINUS3DBM            = 0x03
+POWERLEVEL_SET_MINUS4DBM            = 0x04
+POWERLEVEL_SET_MINUS5DBM            = 0x05
+POWERLEVEL_SET_MINUS6DBM            = 0x06
+POWERLEVEL_SET_MINUS7DBM            = 0x07
+POWERLEVEL_SET_MINUS8DBM            = 0x08
+POWERLEVEL_SET_MINUS9DBM            = 0x09
+
 # Z-Wave Library Types
 ZW_LIB_CONTROLLER_STATIC  = 0x01
 ZW_LIB_CONTROLLER         = 0x02
@@ -99,8 +115,10 @@ TRANSMIT_COMPLETE_OK      =0x00
 TRANSMIT_COMPLETE_NO_ACK  =0x01 
 TRANSMIT_COMPLETE_FAIL    =0x02 
 TRANSMIT_ROUTING_NOT_IDLE =0x03
+
 TRANSMIT_OPTION_ACK = 0x01
 TRANSMIT_OPTION_AUTO_ROUTE = 0x04
+TRANSMIT_OPTION_NO_ROUTE = 0x10
 TRANSMIT_OPTION_EXPLORE = 0x20
 
 # Callback states from ZW_AddNodeToNetwork
@@ -120,7 +138,7 @@ NAK = 0x15
 CAN = 0x18
 REQUEST = 0x00
 RESPONSE = 0x01
-# Most Z-Wave commands want the autoroute option on to be sure it gets thru. Don't use Explorer though as that causes unnecessary delays.
+# Use the normal routing to deliver the SET commands. Don't bother with explorer frames which waste time.
 TXOPTS = TRANSMIT_OPTION_AUTO_ROUTE | TRANSMIT_OPTION_ACK
 
 # See INS13954-7 section 7 Application Note: Z-Wave Protocol Versions on page 433
@@ -368,8 +386,44 @@ if __name__ == "__main__":
         self.PrintVersion() # fetch and display various attributes of the Controller
         exit()
 
+    # Parse command line for other options
+    for i in range(len(sys.argv)):
+        if "DEV" in sys.argv[i]:
+            temp=sys.argv[i].split("=")
+            if len(temp)!=2:
+                print("{} ignored".format(sys.argv[i]))
+            else:
+                DEVKITNODEID=int(temp[1])
+        if "DUT" in sys.argv[i]:
+            temp=sys.argv[i].split("=")
+            if len(temp)!=2:
+                print("{} ignored".format(sys.argv[i]))
+            else:
+                DUTNODEID=int(temp[1])
+    if DEBUG>2: print("DEVKITNODE={}, DUTNODEID={}".format(DEVKITNODEID,DUTNODEID))
+
     # run a range test
 
+    # First check that things are working at full power then do a more complete test
+    # ZW_SEND_DATA(Dest NodeID, Len, data, txopts, funcID)
+    # PowerLevelTestNodeSet(TestNodeID to send NOPs to, power_level, CountMSB, CountLSB)
+    pkt=self.Send2ZWave(pack("!11B",FUNC_ID_ZW_SEND_DATA, DEVKITNODEID,6, 
+    COMMAND_CLASS_POWERLEVEL, POWERLEVEL_TEST_NODE_SET, DUTNODEID, POWERLEVEL_SET_NORMALPOWER, 0, 3, 
+    TXOPTS, 44), True)
+    if len(pkt)<2 or pkt[1]!=0x01: # unable to deliver the SEND_DATA to the serialAPI - just exit
+        print("SerialAPI rejected Z-Wave send {}".format(pkt))
+        exit()
+    pkt=self.GetZWave() # This is the callback confirming the DevKit ACKed the powerlevel_test_set command
+    if len(pkt)<3 or pkt[2]!=0x00:
+        print("DevKit did not ACK Z-Wave command {}".format(pkt))
+        exit()
+    pkt=self.GetZWave(timeout=10000)     # This should be the report which can take a few seconds
+    if len(pkt)!=10 and pkt[9]<1:
+        print("Failed to NOP the DUT, please move closer to DEVKIT {}".format(pkt[9]))
+        exit()
 
+    # Should be able to reach the DUT at full power, so now run a test
+
+    print(pkt)
 
     exit()
