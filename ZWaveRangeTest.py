@@ -3,12 +3,34 @@
     This program is a DEMO only and is provided AS-IS and without support. 
     But feel free to copy and improve!
 
-    Usage: python3 ZWaveRangeTest.py [DevKitNodeID] [DUTNodeID] [COMx] 
-    DevKitNodeID is the NodeID of the Z-Wave DevKit that will send the NOPs to the DUT
-    DUTNodeID is the NodeID of the Device Under Test
-    COMx is the COM port or /dev/tty* port of the Z-Wave interface.
+    Usage: python3 ZWaveRangeTest.py [DEVKITNODEID=xx] [DUTNODEID=xx] [COMPORT=/dev/ttyxxxx or COMx] [inc | exc | rst]
+    DEVKITNODEID is the NodeID of the Z-Wave DevKit that will send the NOPs to the DUT
+    DUTNODEID is the NodeID of the Device Under Test
+    COMPORT is the COM port (windows) or /dev/tty* port (linux) of the Z-Wave interface.
+    INC/EXC/RST are Z-Wave network management commands and will Include, Exclude a node or Reset the UZB.
 
-   SerialAPI: https://www.silabs.com/documents/login/user-guides/INS12350-Serial-API-Host-Appl.-Prg.-Guide.pdf (or search "SerialAPI" on the silabs site)
+    The Range Test utilizes the PowerLevel Command Class to send NOPs at various RF power levels from DEVKIT to DUT.
+    PC/RPi>-----PowerLevel Test Node Set----->DEVKIT------NOPs---------------------->DUT
+    PC/RPi<-----PowerLevel Test Node Report--<DEVKIT<-----ACKs----------------------<DUT
+    The PC/RPi running this script sends Powerlevel Test Node SET commands to the DevKit.
+    The DevKit then sends the desired number of NOPs to the DUT.
+    The DUT ACKs the NOPs if it hears them
+    The DevKit records the number of ACKs and reports that final number back to the PC/RPi.
+    The RF power is adjusted down to find the level where it fails.
+    There are only 4 power levels tested as the other levels generally don't make much of a difference.
+    FULL
+    MINUS4db
+    MINUS6db
+    MINUS9db
+
+    Only the DevKit needs to support the Powerlevel Command class though all Z-Wave Plus devices are required to support it.
+    The DUT needs only to be awake. The Devkit will send NOPs which are ACKed by the Z-Wave protocol so there is no support
+    required within the DUT application code.
+
+    Power Level Command Class is in SDS14784 - Z-Wave Network Protocol CC
+    SerialAPI: https://www.silabs.com/documents/login/user-guides/INS12350-Serial-API-Host-Appl.-Prg.-Guide.pdf (or search "SerialAPI" on the silabs site)
+
+    Author - Eric Ryherd - drzwave@silabs.com - Still learning Python 3 so there may be some python 2 holdovers...
 '''
 
 import serial           # serial port control
@@ -17,12 +39,10 @@ import time
 import os
 from struct            import * # PACK
 
+VERSION       = "1.1 - 8/31/2019"       # Version of this python program
+DEBUG         = 8     # [0-10] higher values print out more debugging info - 0=off
 
-COMPORT       = "/dev/ttyAMA0" # Serial port default - typically /dev/ttyACM0 on Linux or COMxx on Windows.
-
-VERSION       = "1.0 - 8/30/2019"       # Version of this python program
-DEBUG         = 10     # [0-10] higher values print out more debugging info - 0=off
-
+COMPORT     = "/dev/ttyAMA0"    # default COMPORT for the RPi
 # By default the DevKit is NodeID 2 and the DUT is NodeID 3 but these can be passed as arguments
 DEVKITNODEID = 2
 DUTNODEID = 3
@@ -37,6 +57,7 @@ FUNC_ID_SERIAL_API_STARTED          = 0x0A
 FUNC_ID_ZW_SET_RF_RECEIVE_MODE      = 0x10
 FUNC_ID_ZW_SEND_DATA                = 0x13
 FUNC_ID_ZW_GET_VERSION              = 0x15
+FUNC_ID_ZW_SET_DEFAULT              = 0x42
 FUNC_ID_ZW_ADD_NODE_TO_NETWORK      = 0x4A
 FUNC_ID_ZW_REMOVE_NODE_FROM_NETWORK = 0x4B
 FUNC_ID_ZW_FIRMWARE_UPDATE_NVM      = 0x78
@@ -64,12 +85,16 @@ ZW_LIB_DUT                : "DUT",
 ZW_LIB_AVREMOTE           : "AVREMOTE",
 ZW_LIB_AVDEVICE           : "AVDEVICE" }
 
-ADD_NODE_ANY       = 0x01
-ADD_NODE_CONTROLLER= 0x02
-ADD_NODE_SLAVE     = 0x03
-ADD_NODE_EXISTING  = 0x04
-ADD_NODE_STOP      = 0x05
-ADD_NODE_SMART_START = 0x09
+ADD_NODE_ANY                    = 0x01
+ADD_NODE_CONTROLLER             = 0x02
+ADD_NODE_SLAVE                  = 0x03
+ADD_NODE_EXISTING               = 0x04
+ADD_NODE_STOP                   = 0x05
+ADD_NODE_SMART_START            = 0x09
+ADD_NODE_OPTION_NETWORK_WIDE    = 0x40
+ADD_NODE_OPTION_NORMAL_POWER    = 0x80
+ADD_NODE_MODE = ADD_NODE_ANY | ADD_NODE_OPTION_NETWORK_WIDE | ADD_NODE_OPTION_NORMAL_POWER
+
 TRANSMIT_COMPLETE_OK      =0x00
 TRANSMIT_COMPLETE_NO_ACK  =0x01 
 TRANSMIT_COMPLETE_FAIL    =0x02 
@@ -77,6 +102,17 @@ TRANSMIT_ROUTING_NOT_IDLE =0x03
 TRANSMIT_OPTION_ACK = 0x01
 TRANSMIT_OPTION_AUTO_ROUTE = 0x04
 TRANSMIT_OPTION_EXPLORE = 0x20
+
+# Callback states from ZW_AddNodeToNetwork
+ADD_NODE_STATUS_LEARN_READY          =1
+ADD_NODE_STATUS_NODE_FOUND           =2
+ADD_NODE_STATUS_ADDING_SLAVE         =3
+ADD_NODE_STATUS_ADDING_CONTROLLER    =4
+ADD_NODE_STATUS_PROTOCOL_DONE        =5
+ADD_NODE_STATUS_DONE                 =6
+ADD_NODE_STATUS_FAILED               =7
+ADD_NODE_STATUS_NOT_PRIMARY          =0x23
+
 # SerialAPI defines
 SOF = 0x01
 ACK = 0x06
@@ -89,59 +125,40 @@ TXOPTS = TRANSMIT_OPTION_AUTO_ROUTE | TRANSMIT_OPTION_ACK
 
 # See INS13954-7 section 7 Application Note: Z-Wave Protocol Versions on page 433
 ZWAVE_VER_DECODE = {# Z-Wave version to SDK decoder: https://www.silabs.com/products/development-tools/software/z-wave/embedded-sdk/previous-versions
-        "6.04" : "SDK 6.81.03 01/2019",
-        "6.02" : "SDK 6.81.01 10/2018",
-        "6.01" : "SDK 6.81.00 09/2018",
-        "5.03" : "SDK 6.71.03        ",
-        "5.02" : "SDK 6.71.02 07/2017",
-        "4.61" : "SDK 6.71.01 03/2017",
-        "4.60" : "SDK 6.71.00 01/2017",
-        "4.62" : "SDK 6.61.01 04/2017",  # This is the INTERMEDIATE version?
-        "4.33" : "SDK 6.61.00 04/2016",
-        "4.54" : "SDK 6.51.10 02/2017",
-        "4.38" : "SDK 6.51.09 07/2016",
-        "4.34" : "SDK 6.51.08 05/2016",
-        "4.24" : "SDK 6.51.07 02/2016",
-        "4.05" : "SDK 6.51.06 06/2015 or SDK 6.51.05 12/2014",
-        "4.01" : "SDK 6.51.04 05/2014",
-        "3.99" : "SDK 6.51.03 07/2014",
-        "3.95" : "SDK 6.51.02 05/2014",
-        "3.92" : "SDK 6.51.01 04/2014",
-        "3.83" : "SDK 6.51.00 12/2013",
-        "3.79" : "SDK 6.50.01        ",
-        "3.71" : "SDK 6.50.00        ",
-        "3.35" : "SDK 6.10.00        ",
-        "3.41" : "SDK 6.02.00        ",
-        "3.37" : "SDK 6.01.03        "
+        b"6.04" : "SDK 6.81.03 01/2019",
+        b"6.02" : "SDK 6.81.01 10/2018",
+        b"6.01" : "SDK 6.81.00 09/2018",
+        b"5.03" : "SDK 6.71.03        ",
+        b"5.02" : "SDK 6.71.02 07/2017",
+        b"4.61" : "SDK 6.71.01 03/2017",
+        b"4.60" : "SDK 6.71.00 01/2017",
+        b"4.62" : "SDK 6.61.01 04/2017",  # This is the INTERMEDIATE version?
+        b"4.33" : "SDK 6.61.00 04/2016",
+        b"4.54" : "SDK 6.51.10 02/2017",
+        b"4.38" : "SDK 6.51.09 07/2016",
+        b"4.34" : "SDK 6.51.08 05/2016",
+        b"4.24" : "SDK 6.51.07 02/2016",
+        b"4.05" : "SDK 6.51.06 06/2015 or SDK 6.51.05 12/2014",
+        b"4.01" : "SDK 6.51.04 05/2014",
+        b"3.99" : "SDK 6.51.03 07/2014",
+        b"3.95" : "SDK 6.51.02 05/2014",
+        b"3.92" : "SDK 6.51.01 04/2014",
+        b"3.83" : "SDK 6.51.00 12/2013",
+        b"3.79" : "SDK 6.50.01        ",
+        b"3.71" : "SDK 6.50.00        ",
+        b"3.35" : "SDK 6.10.00        ",
+        b"3.41" : "SDK 6.02.00        ",
+        b"3.37" : "SDK 6.01.03        "
         }
 
 class ZWaveRangeTest():
     ''' Z-Wave Range Test '''
     def __init__(self):         # parse the command line arguments and open the serial port
         self.COMPORT=COMPORT
-        self.filename=""
-        if len(sys.argv)==1:     # No arguments then just print the status if the serial port can be opened
-            pass
-        elif len(sys.argv)==2: 
-            if "COM" in sys.argv[1] or "tty" in sys.argv[1]: # no filename - just check the status
-                self.COMPORT=sys.argv[1]
-            else:                                           # use the default COMPORT
-                self.filename=sys.argv[1]
-        elif len(sys.argv)==3:                           # Both comport and filename
-            if "COM" in sys.argv[2] or "tty" in sys.argv[2]:
-                self.COMPORT=sys.argv[2]
-                self.filename=sys.argv[1]
-            elif "COM" in sys.argv[1] or "tty" in sys.argv[1]:
-                self.COMPORT=sys.argv[1]
-                self.filename=sys.argv[2]
-        else:
-            self.usage()
-            sys.exit()
         if DEBUG>3: print("COM Port set to {}".format(self.COMPORT))
-        if DEBUG>3: print("Filename set to {}".format(self.filename))
         try:
             self.UZB= serial.Serial(self.COMPORT,'115200',timeout=2)
-        except serial.SerialException:
+        except:
             print("Unable to open serial port {}".format(self.COMPORT))
             exit()
 
@@ -197,10 +214,10 @@ class ZWaveRangeTest():
         '''
         if self.UZB.inWaiting(): 
             self.UZB.write(pack("B",ACK))  # ACK just to clear out any retries
-            if DEBUG>5: print("Dumping ",)
+            if DEBUG>5: print("Dumping ",end="")
         while self.UZB.inWaiting(): # purge UART RX to remove any old frames we don't want
             c=self.UZB.read()
-            if DEBUG>5: print("{:02X}".format(ord(c)),)
+            if DEBUG>5: print("{:02X}".format(ord(c)),end="")
         frame = pack("2B", len(SerialAPIcmd)+2, REQUEST) + SerialAPIcmd # add LEN and REQ bytes which are part of the checksum
         chksum= self.checksum(frame)
         pkt = (pack("B",SOF) + frame + pack("B",chksum)) # add SOF to front and CHECKSUM to end
@@ -244,13 +261,13 @@ class ZWaveRangeTest():
             print("Lifeline removed")
         if DEBUG>10: 
             for i in range(len(pkt)): 
-                print("{:02X}".format(ord(pkt[i])),)
+                print("{:02X}".format(ord(pkt[i])),end="")
 
     def PrintVersion(self):
         pkt=self.Send2ZWave(pack("B",FUNC_ID_SERIAL_API_GET_CAPABILITIES),True)
         (ver, rev, man_id, man_prod_type, man_prod_type_id, supported) = unpack("!2B3H32s", pkt[1:])
         print("SerialAPI Ver={0}.{1}".format(ver,rev))   # SerialAPI version is different than the SDK version
-        print("Mfg={:04X}".format(man_id),)
+        print("Mfg={:04X}".format(man_id),end="")
         if man_id==0: 
             print("Silicon Labs")
         else:
@@ -260,45 +277,99 @@ class ZWaveRangeTest():
         (VerStr, lib) = unpack("!12sB", pkt[1:])
         VersionKey=VerStr[-5:-1]
         if VersionKey in ZWAVE_VER_DECODE:
-            print("{} {}".format(VerStr,ZWAVE_VER_DECODE[VersionKey]))
+            print("{} {}".format(VerStr.decode('utf-8'),ZWAVE_VER_DECODE[VersionKey]))
         else:
             print("Z-Wave version unknown = {}".format(VerStr))
         print("Library={} {}".format(lib,libType[lib]))
         pkt=self.Send2ZWave(pack("B",FUNC_ID_SERIAL_API_GET_INIT_DATA),True)
         if pkt!=None and len(pkt)>33:
-            print("NodeIDs=",)
+            print("NodeIDs=",end="")
             for k in [4,28+4]:
-                j=ord(pkt[k]) # this is the first 8 nodes
+                j=pkt[k] # this is the first 8 nodes
                 for i in range(0,8):
                     if (1<<i)&j:
-                        print("{},".format(i+1+ 8*(k-4)),)
+                        print("{},".format(i+1+ 8*(k-4)),end="")
             print(" ")
-        pkt=self.Send2ZWave(pack("BB",FUNC_ID_ZW_FIRMWARE_UPDATE_NVM,FIRMWARE_UPDATE_NVM_INIT),True)
-        (cmd, FirmwareUpdateSupported) = unpack("!BB", pkt[1:])
-        if FirmwareUpdateSupported!=0x01:
-            print("Firmware is not OTW capable - exiting {}".format(FirmwareUpdateSupported))
-            exit()
-        if self.filename=="":        # Skip OTW if no hex file is on the command line
-            exit()
 
-    def usage(self):
+    def usage():
         print("")
-        print("Usage: python3 ZWaveRangeTest.py [DEVKITNODEID=xx] [DUTNODEID=xx] [COMxx]")
+        print("Usage: python3 ZWaveRangeTest.py [DEVKITNODEID=xx] [DUTNODEID=xx] [COMPORT=COMxx] [inc|exc|rst]")
         print("Version {}".format(VERSION))
+        print("DEVKITNODEID=NodeID in HEX for the Developer Kit Node. This is the node that sends the NOPs")
+        print("DUTNODEID=NodeID in HEX for Device Under Test")
         print("COMxx is the Z-Wave UART interface - typically COMxx for windows and /dev/ttyXXXX for Linux")
+        print("There are 3 optional commandline arguments for managing the Z-Wave Network")
+        print(" inc=Include a node into the network - the NodeID will be printed when complete")
+        print(" exc=Exclude a node out of the network")
+        print(" rst=Delete the Z-Wave network and start fresh - ZW_SetDefault()")
+        print(" Using one of these 3 options does the requested operation and no range testing is done")
         print("")
 
 if __name__ == "__main__":
     ''' Start the app if this file is executed'''
+
+    for i in range(len(sys.argv)):          # first check if the COMPORT has been passed in
+        if "COMPORT" in sys.argv[i]:
+            temp=sys.argv[i].split("=")
+            if len(temp)<2:
+                ZWaveRangeTest.usage()
+                exit()
+            COMPORT=temp[1]
+
     try:
-        self=ZWaveRangeTest()
+        self=ZWaveRangeTest()       # open the serial port to the UZB or Z-Wave interface
     except:
         print('error - unable to start program')
-        self.usage()
+        ZWaveRangeTest.usage()
         exit()
 
-    # fetch and display various attributes of the Controller - these are not required
-    self.PrintVersion()
+    if "inc" in sys.argv:   # The Network Management commands just exit upon the completion of the command
+        print("Press button on device to be Included",end="")
+        pkt=self.Send2ZWave(pack("!3B",FUNC_ID_ZW_ADD_NODE_TO_NETWORK,ADD_NODE_MODE,0x98),True,timeout=10000)
+        if pkt[2]!=0x01:    # try again if we don't get a READY
+            pkt=self.Send2ZWave(pack("!3B",FUNC_ID_ZW_REMOVE_NODE_FROM_NETWORK,ADD_NODE_MODE,0x99),True,timeout=10000)
+        print(" Now")
+        pkt=self.GetZWave(timeout=10000) # might be a while before the user presses the button so extend timeout
+        state=0
+        while state<5 and len(pkt)>2 and not (pkt[2]==0x05 or pkt[2]==0x06):
+            state+=1
+            pkt=self.GetZWave()
+            if DEBUG>7: print(pkt)
+            if len(pkt)>3 and (pkt[2]==ADD_NODE_SLAVE or pkt[2]==ADD_NODE_CONTROLLER):
+                print("adding NodeID={}".format(pkt[3]))
+        self.Send2ZWave(pack("!3B",FUNC_ID_ZW_ADD_NODE_TO_NETWORK,ADD_NODE_STOP,0x00),timeout=10000)
+        exit()
+    elif "exc" in sys.argv:
+        print("Press button on device to be Excluded",end="")
+        pkt=self.Send2ZWave(pack("!3B",FUNC_ID_ZW_REMOVE_NODE_FROM_NETWORK,ADD_NODE_MODE,0x99),True,timeout=10000)
+        if pkt[2]!=0x01:    # try again if we don't get a READY
+            pkt=self.Send2ZWave(pack("!3B",FUNC_ID_ZW_REMOVE_NODE_FROM_NETWORK,ADD_NODE_MODE,0x99),True,timeout=10000)
+        print(" Now")
+        pkt=self.GetZWave(timeout=10000) # might be a while before the user presses the button so extend timeout
+        state=0
+        while state<5 and len(pkt)>2 and not (pkt[2]==0x05 or pkt[2]==0x06):
+            state+=1
+            pkt=self.GetZWave()
+            if DEBUG>7: print(pkt)
+            if len(pkt)>3 and (pkt[2]==ADD_NODE_SLAVE or pkt[2]==ADD_NODE_CONTROLLER):
+                print("Excluding NodeID={}".format(pkt[3]))
+        self.Send2ZWave(pack("!3B",FUNC_ID_ZW_REMOVE_NODE_FROM_NETWORK,ADD_NODE_STOP,0x00),timeout=10000)
+        exit()
+    elif "rst" in sys.argv:
+        print("Resetting Z-Wave network to factory defaults - please wait")
+        self.Send2ZWave(pack("!B",FUNC_ID_ZW_SET_DEFAULT),False)
+        time.sleep(2)
+        #pkt=self.GetZWave()
+        #if DEBUG>7: print(pkt)
+        self.PrintVersion() # fetch and display various attributes of the Controller
+        exit()
+    elif "help" in sys.argv or "-help" in sys.argv:
+        ZWaveRangeTest.usage()
+        self.PrintVersion() # fetch and display various attributes of the Controller
+        exit()
+
+    # run a range test
+
+
 
     exit()
-
