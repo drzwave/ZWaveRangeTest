@@ -10,22 +10,32 @@
     INC/EXC/RST are Z-Wave network management commands and will Include, Exclude a node or Reset the UZB.
 
     The Range Test utilizes the PowerLevel Command Class to send NOPs at various RF power levels from DEVKIT to DUT.
-    PC/RPi>-----PowerLevel Test Node Set----->DEVKIT------NOPs---------------------->DUT
+    PC/RPi>-----PowerLevel Test Node Set----->DEVKIT>-----NOPs---------------------->DUT
+                                                                                      |
+                                                                                      V
     PC/RPi<-----PowerLevel Test Node Report--<DEVKIT<-----ACKs----------------------<DUT
+
     The PC/RPi running this script sends Powerlevel Test Node SET commands to the DevKit.
-    The DevKit then sends the desired number of NOPs to the DUT.
-    The DUT ACKs the NOPs if it hears them
+    The DevKit then sends the desired number of NOPs to the DUT at the chosen RF power level.
+    The DUT ACKs the NOPs if it hears them.
     The DevKit records the number of ACKs and reports that final number back to the PC/RPi.
     The RF power is adjusted down to find the level where it fails.
     There are only 4 power levels tested as the other levels generally don't make much of a difference.
     FULL
     MINUS4db
-    MINUS6db
-    MINUS9db
+    MINUS8db
+    MINUS9db (which is really -10dB)
 
     Only the DevKit needs to support the Powerlevel Command class though all Z-Wave Plus devices are required to support it.
-    The DUT needs only to be awake. The Devkit will send NOPs which are ACKed by the Z-Wave protocol so there is no support
-    required within the DUT application code.
+    The DevKit is assumed to be running a relatively new version of one of the always-on sample apps (SwitchOnOff) which
+    will automatically send the Power Level Test Report upon completion of the NOPs. 
+    The DUT must be awake. The Devkit will send NOPs which are ACKed by the Z-Wave protocol so there is no requirements
+    for the DUT application code.
+
+    NOTE NOTE NOTE !!! This test cannot officially be used for Z-Wave Certification of the CER as the NOPs are sent 
+    3 times if they are not ACKed. The retries are the normal protocol operation so this is what will happen in typical networks.
+    The RailTest procedure listed in INS14283 is the official procedure which will only send the NOP once.
+    However, this program can be used to quickly and easily measure the range of any Z-Wave device for basic information purposes.
 
     Power Level Command Class is in SDS14784 - Z-Wave Network Protocol CC
     SerialAPI: https://www.silabs.com/documents/login/user-guides/INS12350-Serial-API-Host-Appl.-Prg.-Guide.pdf (or search "SerialAPI" on the silabs site)
@@ -39,8 +49,8 @@ import time
 import os
 from struct            import * # PACK
 
-VERSION       = "1.1 - 8/31/2019"       # Version of this python program
-DEBUG         = 8     # [0-10] higher values print out more debugging info - 0=off
+VERSION       = "1.2 - 9/3/2019"       # Version of this python program
+DEBUG         = 4     # [0-10] higher values print out more debugging info - 0=off
 
 COMPORT     = "/dev/ttyAMA0"    # default COMPORT for the RPi
 # By default the DevKit is NodeID 2 and the DUT is NodeID 3 but these can be passed as arguments
@@ -415,15 +425,36 @@ if __name__ == "__main__":
         exit()
     pkt=self.GetZWave() # This is the callback confirming the DevKit ACKed the powerlevel_test_set command
     if len(pkt)<3 or pkt[2]!=0x00:
-        print("DevKit did not ACK Z-Wave command {}".format(pkt))
+        print("DevKit did not ACK Z-Wave command. Is DEV={} the correct NodeID?".format(DEVKITNODEID))
+        if DEBUG>5: print(pkt)
         exit()
     pkt=self.GetZWave(timeout=10000)     # This should be the report which can take a few seconds
-    if len(pkt)!=10 and pkt[9]<1:
-        print("Failed to NOP the DUT, please move closer to DEVKIT {}".format(pkt[9]))
+    if len(pkt)!=10 or pkt[9]<1:
+        print("Failed to NOP the DUT, please move DUT closer to DEVKIT")
         exit()
 
-    # Should be able to reach the DUT at full power, so now run a test
+    # Able to reach the DUT at full power, so now run a test to determine the lowest RF power at this range
 
-    print(pkt)
+    PowerLevelTests = ( POWERLEVEL_SET_NORMALPOWER, POWERLEVEL_SET_MINUS4DBM, POWERLEVEL_SET_MINUS8DBM, POWERLEVEL_SET_MINUS9DBM) 
+    PowerLevelText = { POWERLEVEL_SET_NORMALPOWER: "full", 
+    POWERLEVEL_SET_MINUS4DBM: "-4dBm",
+    POWERLEVEL_SET_MINUS8DBM: "-8dBm",
+    POWERLEVEL_SET_MINUS9DBM: "-10dBm"}
+    lastPowerLevel=POWERLEVEL_SET_NORMALPOWER
+    lastAck=0
+    for powerlevel in PowerLevelTests:
+        pkt=self.Send2ZWave(pack("!11B",FUNC_ID_ZW_SEND_DATA, DEVKITNODEID,6, 
+        COMMAND_CLASS_POWERLEVEL, POWERLEVEL_TEST_NODE_SET, DUTNODEID, powerlevel, 0, 10, 
+        TXOPTS, 33), True)
+        pkt=self.GetZWave() # Devkit ACK
+        pkt=self.GetZWave(timeout=10000)     # This should be the report which can take a few seconds
+        if DEBUG>1 and len(pkt)==10: 
+            print("Acks={} at power={}".format(pkt[9],PowerLevelText[powerlevel]))
+        if len(pkt)!=10 or pkt[9]<5:       # less than 50% ACK rate is the cutoff for passing or not
+            break
+        lastPowerLevel=powerlevel
+        lastAck=pkt[9]
+
+    print("DUTNodeID={}, ACK={}%, Min Power level={}".format(DUTNODEID,lastAck*10,PowerLevelText[lastPowerLevel]))
 
     exit()
