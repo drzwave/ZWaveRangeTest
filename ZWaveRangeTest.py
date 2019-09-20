@@ -30,9 +30,15 @@
     The DevKit is assumed to be running a relatively new version of one of the always-on sample apps (SwitchOnOff) which
     will automatically send the Power Level Test Report upon completion of the NOPs. 
     The DUT must be awake. The Devkit will send NOPs which are ACKed by the Z-Wave protocol so there is no requirements
-    for the DUT application code.
+    on the DUT application code.
 
-    NOTE NOTE NOTE !!! This test cannot officially be used for Z-Wave Certification of the CER as the NOPs are sent 
+    The recommended setup is to have the DEVKIT to be close enough to the RPi/PC for reliable singlecast communication.
+    If the DEVKIT is too far away and requires routing then the routed commands tend to interfere with the NOPs.
+    Place the DUT at a distant location.
+
+    FLiRS and RSS (sleeping devices) generally have to be forced to stay awake during this test. Otherwise the NOPs will fail.
+
+    NOTE!!! This test cannot officially be used for Z-Wave Certification of the CER as the NOPs are sent 
     3 times if they are not ACKed. The retries are the normal protocol operation so this is what will happen in typical networks.
     The RailTest procedure listed in INS14283 is the official procedure which will only send the NOP once.
     However, this program can be used to quickly and easily measure the range of any Z-Wave device for basic information purposes.
@@ -49,7 +55,7 @@ import time
 import os
 from struct            import * # PACK
 
-VERSION       = "1.2 - 9/3/2019"       # Version of this python program
+VERSION       = "1.3 - 10/2/2019"       # Version of this python program
 DEBUG         = 4     # [0-10] higher values print out more debugging info - 0=off
 
 COMPORT     = "/dev/ttyAMA0"    # default COMPORT for the RPi
@@ -58,19 +64,23 @@ DEVKITNODEID = 2
 DUTNODEID = 3
 
 # Handy defines mostly copied from ZW_transport_api.py
-FUNC_ID_SERIAL_API_GET_INIT_DATA    = 0x02
+FUNC_ID_SERIAL_API_GET_INIT_DATA         = 0x02
 FUNC_ID_SERIAL_API_APPL_NODE_INFORMATION = 0x03
-FUNC_ID_SERIAL_API_GET_CAPABILITIES = 0x07
-FUNC_ID_SERIAL_API_SOFT_RESET       = 0x08
-FUNC_ID_ZW_GET_PROTOCOL_VERSION     = 0x09
-FUNC_ID_SERIAL_API_STARTED          = 0x0A
-FUNC_ID_ZW_SET_RF_RECEIVE_MODE      = 0x10
-FUNC_ID_ZW_SEND_DATA                = 0x13
-FUNC_ID_ZW_GET_VERSION              = 0x15
-FUNC_ID_ZW_SET_DEFAULT              = 0x42
-FUNC_ID_ZW_ADD_NODE_TO_NETWORK      = 0x4A
-FUNC_ID_ZW_REMOVE_NODE_FROM_NETWORK = 0x4B
-FUNC_ID_ZW_FIRMWARE_UPDATE_NVM      = 0x78
+FUNC_ID_SERIAL_API_GET_CAPABILITIES      = 0x07
+FUNC_ID_SERIAL_API_SOFT_RESET            = 0x08
+FUNC_ID_ZW_GET_PROTOCOL_VERSION          = 0x09
+FUNC_ID_SERIAL_API_STARTED               = 0x0A
+FUNC_ID_ZW_SET_RF_RECEIVE_MODE           = 0x10
+FUNC_ID_ZW_SEND_DATA                     = 0x13
+FUNC_ID_ZW_GET_VERSION                   = 0x15
+FUNC_ID_ZW_GET_NODE_PROTOCOL_INFO        = 0x41
+FUNC_ID_ZW_SET_DEFAULT                   = 0x42
+FUNC_ID_ZW_ASSIGN_RETURN_ROUTE           = 0x46
+FUNC_ID_ZW_REQUEST_NODE_NEIGHBOR_UPDATE  = 0x48
+FUNC_ID_ZW_ADD_NODE_TO_NETWORK           = 0x4A
+FUNC_ID_ZW_REMOVE_NODE_FROM_NETWORK      = 0x4B
+FUNC_ID_ZW_REQUEST_NODE_INFO             = 0x60
+FUNC_ID_ZW_FIRMWARE_UPDATE_NVM           = 0x78
 
 # PowerLevel Command Class defines
 COMMAND_CLASS_POWERLEVEL            = 0x73
@@ -140,6 +150,12 @@ ADD_NODE_STATUS_PROTOCOL_DONE        =5
 ADD_NODE_STATUS_DONE                 =6
 ADD_NODE_STATUS_FAILED               =7
 ADD_NODE_STATUS_NOT_PRIMARY          =0x23
+
+# Command Class Commands
+COMMAND_CLASS_BASIC                  =0x20
+BASIC_GET                            =0x02
+COMMAND_CLASS_ZWAVE_PLUS_INFO        =0x5E
+ZWAVEPLUS_INFO_GET                   =0x01
 
 # SerialAPI defines
 SOF = 0x01
@@ -359,11 +375,11 @@ if __name__ == "__main__":
         print(" Now")
         pkt=self.GetZWave(timeout=10000) # might be a while before the user presses the button so extend timeout
         state=0
-        while state<5 and len(pkt)>2 and not (pkt[2]==0x05 or pkt[2]==0x06):
+        while state<5 and pkt!=None and len(pkt)>2 and not (pkt[2]==0x05 or pkt[2]==0x06):
             state+=1
             pkt=self.GetZWave()
             if DEBUG>7: print(pkt)
-            if len(pkt)>3 and (pkt[2]==ADD_NODE_SLAVE or pkt[2]==ADD_NODE_CONTROLLER):
+            if pkt!=None and len(pkt)>3 and (pkt[2]==ADD_NODE_SLAVE or pkt[2]==ADD_NODE_CONTROLLER):
                 print("adding NodeID={}".format(pkt[3]))
         self.Send2ZWave(pack("!3B",FUNC_ID_ZW_ADD_NODE_TO_NETWORK,ADD_NODE_STOP,0x00),timeout=10000)
         exit()
@@ -375,11 +391,11 @@ if __name__ == "__main__":
         print(" Now")
         pkt=self.GetZWave(timeout=10000) # might be a while before the user presses the button so extend timeout
         state=0
-        while state<5 and len(pkt)>2 and not (pkt[2]==0x05 or pkt[2]==0x06):
+        while state<5 and pkt!=None and len(pkt)>2 and not (pkt[2]==0x05 or pkt[2]==0x06):
             state+=1
             pkt=self.GetZWave()
             if DEBUG>7: print(pkt)
-            if len(pkt)>3 and (pkt[2]==ADD_NODE_SLAVE or pkt[2]==ADD_NODE_CONTROLLER):
+            if pkt!=None and len(pkt)>3 and (pkt[2]==ADD_NODE_SLAVE or pkt[2]==ADD_NODE_CONTROLLER):
                 print("Excluding NodeID={}".format(pkt[3]))
         self.Send2ZWave(pack("!3B",FUNC_ID_ZW_REMOVE_NODE_FROM_NETWORK,ADD_NODE_STOP,0x00),timeout=10000)
         exit()
@@ -391,7 +407,7 @@ if __name__ == "__main__":
         #if DEBUG>7: print(pkt)
         self.PrintVersion() # fetch and display various attributes of the Controller
         exit()
-    elif "help" in sys.argv or "-help" in sys.argv:
+    elif "help" in sys.argv or "-help" in sys.argv or "?" in sys.argv:
         ZWaveRangeTest.usage()
         self.PrintVersion() # fetch and display various attributes of the Controller
         exit()
@@ -417,6 +433,35 @@ if __name__ == "__main__":
     # First check that things are working at full power then do a more complete test
     # ZW_SEND_DATA(Dest NodeID, Len, data, txopts, funcID)
     # PowerLevelTestNodeSet(TestNodeID to send NOPs to, power_level, CountMSB, CountLSB)
+    # The very first thing to do is to rediscover neighbors so the DUT knows there is a FLiRS device and will send a BEAM.
+    # This is mostly for FLiRS devices so the device knows to send a BEAM first.
+
+    # Get the protocol Info for the DUT. Need to know if it is a listening node or not.
+    # If the DUT is NOT listening, send a BASIC GET before each set of NOPs to either wake it if it is a FLiRS node or keep it awake if it is sleeping.
+    # unfortunately all this experimentation didn't work. The only way to test FLiRs/RSS devices is to force them to stay awake.
+    ''''
+    # this code is commented out - it was an experiment to see if a FLiRS device could be woken with a beam before the NOPs are sent.
+    # Unfortunately the NOPs will not send a BEAM - they assume the device is awake.
+    DUTisListening=True
+    pkt=self.Send2ZWave(pack("!2B",FUNC_ID_ZW_GET_NODE_PROTOCOL_INFO, DUTNODEID), True)
+    if pkt!=None and (pkt[1]&0x80)==0:
+        DUTisListening=False
+        if DEBUG>3: print("DUT is not a listening Node")
+
+    #pkt=self.Send2ZWave(pack("!4B",FUNC_ID_ZW_ASSIGN_RETURN_ROUTE, DEVKITNODEID, DUTNODEID, 31), True)
+    #print(pkt)
+    #time.sleep(2)
+
+    #pkt=self.Send2ZWave(pack("!3B",FUNC_ID_ZW_REQUEST_NODE_NEIGHBOR_UPDATE, DEVKITNODEID, 32), True)
+    #print(pkt)
+    #time.sleep(2)
+
+    if not DUTisListening:
+        # send an invalid ZWAVEPLUS command which will wake the node up and hopefully keep the application awake
+        pkt=self.Send2ZWave(pack("!6B",FUNC_ID_ZW_SEND_DATA, DUTNODEID, 2, COMMAND_CLASS_ZWAVE_PLUS_INFO, 0, 32), True)
+        time.sleep(1)
+    '''
+
     pkt=self.Send2ZWave(pack("!11B",FUNC_ID_ZW_SEND_DATA, DEVKITNODEID,6, 
     COMMAND_CLASS_POWERLEVEL, POWERLEVEL_TEST_NODE_SET, DUTNODEID, POWERLEVEL_SET_NORMALPOWER, 0, 3, 
     TXOPTS, 44), True)
@@ -443,17 +488,25 @@ if __name__ == "__main__":
     lastPowerLevel=POWERLEVEL_SET_NORMALPOWER
     lastAck=0
     for powerlevel in PowerLevelTests:
+        '''
+        # commented out as this experiment didn't work.
+        if not DUTisListening:
+            # send an invalid ZWAVEPLUS command which will wake the node up and hopefully keep the application awake
+            pkt=self.Send2ZWave(pack("!6B",FUNC_ID_ZW_SEND_DATA, DUTNODEID, 2, COMMAND_CLASS_ZWAVE_PLUS_INFO, 0, 32), True)
+            time.sleep(1)
+        '''
         pkt=self.Send2ZWave(pack("!11B",FUNC_ID_ZW_SEND_DATA, DEVKITNODEID,6, 
         COMMAND_CLASS_POWERLEVEL, POWERLEVEL_TEST_NODE_SET, DUTNODEID, powerlevel, 0, 10, 
         TXOPTS, 33), True)
         pkt=self.GetZWave() # Devkit ACK
-        pkt=self.GetZWave(timeout=10000)     # This should be the report which can take a few seconds
+        pkt=self.GetZWave(timeout=12000)     # This should be the report which can take a few seconds
         if DEBUG>1 and len(pkt)==10: 
             print("Acks={} at power={}".format(pkt[9],PowerLevelText[powerlevel]))
         if len(pkt)!=10 or pkt[9]<5:       # less than 50% ACK rate is the cutoff for passing or not
             break
         lastPowerLevel=powerlevel
         lastAck=pkt[9]
+        time.sleep(2)                   # wait just a bit to let the network clear if something is still blasting away
 
     print("DUTNodeID={}, ACK={}%, Min Power level={}".format(DUTNODEID,lastAck*10,PowerLevelText[lastPowerLevel]))
 
